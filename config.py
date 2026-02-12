@@ -7,14 +7,12 @@ load_dotenv()
 
 
 class Config:
-    # Twilio
-    TWILIO_ACCOUNT_SID: str = os.environ.get("TWILIO_ACCOUNT_SID", "")
-    TWILIO_AUTH_TOKEN: str = os.environ.get("TWILIO_AUTH_TOKEN", "")
-    TWILIO_PHONE_NUMBER: str = os.environ.get("TWILIO_PHONE_NUMBER", "whatsapp:+14155238886")
+    # Telegram
+    TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
-    # Security
-    ALLOWED_PHONES: list[str] = [
-        p.strip() for p in os.environ.get("ALLOWED_PHONES", "").split(",") if p.strip()
+    # Security: allowed Telegram user IDs
+    ALLOWED_USERS: list[int] = [
+        int(u.strip()) for u in os.environ.get("ALLOWED_USERS", "").split(",") if u.strip()
     ]
 
     # Claude
@@ -23,10 +21,6 @@ class Config:
     CLAUDE_MAX_TIMEOUT: int = int(os.environ.get("CLAUDE_MAX_TIMEOUT", "120"))
     CLAUDE_MAX_BUDGET_USD: float = float(os.environ.get("CLAUDE_MAX_BUDGET_USD", "1.00"))
 
-    # Server
-    FLASK_PORT: int = int(os.environ.get("FLASK_PORT", "5000"))
-    VALIDATE_TWILIO_SIGNATURE: bool = os.environ.get("VALIDATE_TWILIO_SIGNATURE", "true").lower() == "true"
-
     # Derived
     DB_PATH: str = os.path.join(os.path.expanduser("~"), ".phone-bridge", "sessions.db")
 
@@ -34,12 +28,8 @@ class Config:
     def validate(cls):
         """Check required fields are set. Exit with a clear message if not."""
         missing = []
-        if not cls.TWILIO_ACCOUNT_SID or cls.TWILIO_ACCOUNT_SID.startswith("ACxxxx"):
-            missing.append("TWILIO_ACCOUNT_SID")
-        if not cls.TWILIO_AUTH_TOKEN or cls.TWILIO_AUTH_TOKEN == "your_auth_token_here":
-            missing.append("TWILIO_AUTH_TOKEN")
-        if not cls.ALLOWED_PHONES:
-            missing.append("ALLOWED_PHONES")
+        if not cls.TELEGRAM_BOT_TOKEN or cls.TELEGRAM_BOT_TOKEN == "your_bot_token_here":
+            missing.append("TELEGRAM_BOT_TOKEN")
 
         if missing:
             print(f"Error: Missing required config in .env: {', '.join(missing)}")

@@ -1,10 +1,8 @@
+import asyncio
 import logging
-import threading
 
-from flask import Flask, Response, request
-from twilio.request_validator import RequestValidator
-from twilio.twiml.messaging_response import MessagingResponse
-from werkzeug.middleware.proxy_fix import ProxyFix
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 from config import Config
 from session_store import SessionStore
@@ -13,10 +11,6 @@ from message_sender import MessageSender
 
 Config.validate()
 
-app = Flask(__name__)
-# Trust X-Forwarded-* headers from the tunnel so request.url matches
-# what Twilio signed against (the public HTTPS URL, not localhost)
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 logger = logging.getLogger("phone-bridge")
 
 store = SessionStore(Config.DB_PATH)
@@ -26,141 +20,152 @@ runner = ClaudeRunner(
     max_timeout=Config.CLAUDE_MAX_TIMEOUT,
     max_budget_usd=Config.CLAUDE_MAX_BUDGET_USD,
 )
-sender = MessageSender(
-    Config.TWILIO_ACCOUNT_SID,
-    Config.TWILIO_AUTH_TOKEN,
-    Config.TWILIO_PHONE_NUMBER,
-)
-validator = RequestValidator(Config.TWILIO_AUTH_TOKEN)
 
-# Per-phone locks to serialize concurrent messages from the same user
-_phone_locks: dict[str, threading.Lock] = {}
-_locks_lock = threading.Lock()
+# Per-user locks to serialize concurrent messages
+_user_locks: dict[int, asyncio.Lock] = {}
 
 
-def _get_phone_lock(phone: str) -> threading.Lock:
-    with _locks_lock:
-        if phone not in _phone_locks:
-            _phone_locks[phone] = threading.Lock()
-        return _phone_locks[phone]
+def _get_user_lock(user_id: int) -> asyncio.Lock:
+    if user_id not in _user_locks:
+        _user_locks[user_id] = asyncio.Lock()
+    return _user_locks[user_id]
 
 
-def _empty_twiml() -> Response:
-    resp = MessagingResponse()
-    return Response(str(resp), content_type="application/xml")
+def _is_allowed(user_id: int) -> bool:
+    # If no allowlist configured, allow anyone (but log a warning)
+    if not Config.ALLOWED_USERS:
+        return True
+    return user_id in Config.ALLOWED_USERS
 
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    # Validate Twilio signature
-    if Config.VALIDATE_TWILIO_SIGNATURE:
-        sig = request.headers.get("X-Twilio-Signature", "")
-        if not validator.validate(request.url, request.form.to_dict(), sig):
-            logger.warning("Invalid Twilio signature — rejecting request")
-            return Response("Forbidden", status=403)
-
-    from_number = request.form.get("From", "")
-    body = request.form.get("Body", "").strip()
-
-    logger.info(f"Message from {from_number}: {body[:80]!r}")
-
-    # Check allowlist
-    bare_number = from_number.replace("whatsapp:", "")
-    if bare_number not in Config.ALLOWED_PHONES:
-        logger.warning(f"Blocked message from unlisted number: {from_number}")
-        return _empty_twiml()
-
-    # Handle special commands
-    if body.lower() == "/reset":
-        store.reset_session(from_number)
-        sender.send(from_number, "Session reset. Next message starts a fresh conversation.")
-        return _empty_twiml()
-
-    if body.lower() == "/status":
-        session_id = store.get_session(from_number)
-        info = store.list_sessions()
-        entry = next((s for s in info if s["phone_number"] == from_number), None)
-        lines = [
-            f"Session: {session_id or 'none'}",
-            f"Dir: {Config.CLAUDE_WORKING_DIR}",
-            f"Tools: {Config.CLAUDE_ALLOWED_TOOLS}",
-        ]
-        if entry:
-            lines.append(f"Messages: {entry['message_count']}")
-            lines.append(f"Last used: {entry['last_used_at']}")
-        sender.send(from_number, "\n".join(lines))
-        return _empty_twiml()
-
-    if body.lower() == "/more":
-        if sender.has_overflow(from_number):
-            threading.Thread(
-                target=sender.send_more,
-                args=(from_number,),
-                daemon=True,
-            ).start()
-        else:
-            sender.send(from_number, "No more content to send.")
-        return _empty_twiml()
-
-    if body.lower() == "/help":
-        sender.send(from_number, (
-            "Commands:\n"
-            "/reset — Start a new session\n"
-            "/status — Show current session info\n"
-            "/more — Get truncated content\n"
-            "/help — Show this message\n\n"
-            "Anything else is sent to Claude Code."
-        ))
-        return _empty_twiml()
-
-    # Process in background thread
-    thread = threading.Thread(
-        target=_process_message,
-        args=(from_number, body),
-        daemon=True,
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    logger.info(f"/start from user {user.id} ({user.username})")
+    await update.message.reply_text(
+        f"Phone Bridge is running.\n\n"
+        f"Your user ID: {user.id}\n"
+        f"Add this to ALLOWED_USERS in .env to lock down access.\n\n"
+        f"Send any message to talk to Claude Code.\n"
+        f"Commands: /reset /status /more /help"
     )
-    thread.start()
-
-    return _empty_twiml()
 
 
-def _process_message(from_number: str, body: str):
-    lock = _get_phone_lock(from_number)
-    with lock:
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    await update.message.reply_text(
+        "Commands:\n"
+        "/reset — Start a new session\n"
+        "/status — Show current session info\n"
+        "/more — Get truncated content\n"
+        "/help — Show this message\n\n"
+        "Anything else is sent to Claude Code."
+    )
+
+
+async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not _is_allowed(user_id):
+        return
+    store.reset_session(str(user_id))
+    await update.message.reply_text("Session reset. Next message starts a fresh conversation.")
+
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not _is_allowed(user_id):
+        return
+    session_id = store.get_session(str(user_id))
+    info = store.list_sessions()
+    entry = next((s for s in info if s["phone_number"] == str(user_id)), None)
+    lines = [
+        f"Session: {session_id or 'none'}",
+        f"Dir: {Config.CLAUDE_WORKING_DIR}",
+        f"Tools: {Config.CLAUDE_ALLOWED_TOOLS}",
+    ]
+    if entry:
+        lines.append(f"Messages: {entry['message_count']}")
+        lines.append(f"Last used: {entry['last_used_at']}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not _is_allowed(user_id):
+        return
+    sender: MessageSender = context.bot_data["sender"]
+    if sender.has_overflow(user_id):
+        await sender.send_more(user_id)
+    else:
+        await update.message.reply_text("No more content to send.")
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    body = update.message.text.strip()
+
+    if not _is_allowed(user_id):
+        logger.warning(f"Blocked message from user {user_id}")
+        return
+
+    logger.info(f"Message from {user_id}: {body[:80]!r}")
+    sender: MessageSender = context.bot_data["sender"]
+
+    lock = _get_user_lock(user_id)
+    async with lock:
         try:
-            session_id = store.get_session(from_number)
-            result = runner.run(prompt=body, session_id=session_id)
+            session_id = store.get_session(str(user_id))
 
-            # Persist session
-            store.save_session(from_number, result.session_id, Config.CLAUDE_WORKING_DIR)
+            # Run Claude in a thread to avoid blocking the event loop
+            result = await asyncio.to_thread(runner.run, prompt=body, session_id=session_id)
 
-            # Build response
+            store.save_session(str(user_id), result.session_id, Config.CLAUDE_WORKING_DIR)
+
             text = result.text
             if result.cost_usd > 0:
                 text += f"\n\n[${result.cost_usd:.4f} | {result.duration_ms / 1000:.1f}s]"
 
-            sender.send(from_number, text)
+            await sender.send(user_id, text)
 
         except Exception:
-            logger.exception(f"Error processing message from {from_number}")
+            logger.exception(f"Error processing message from {user_id}")
             try:
-                sender.send(from_number, "Something went wrong processing your message. Check server logs.")
+                await update.message.reply_text(
+                    "Something went wrong processing your message. Check server logs."
+                )
             except Exception:
                 logger.exception("Failed to send error reply")
 
 
-@app.route("/health", methods=["GET"])
-def health():
-    return {"status": "ok"}
-
-
-if __name__ == "__main__":
+def main():
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    logger.info(f"Starting phone-bridge on port {Config.FLASK_PORT}")
+
     logger.info(f"Claude working dir: {Config.CLAUDE_WORKING_DIR}")
-    logger.info(f"Allowed phones: {Config.ALLOWED_PHONES}")
-    logger.info(f"WhatsApp mode: {Config.TWILIO_PHONE_NUMBER.startswith('whatsapp:')}")
-    app.run(host="127.0.0.1", port=Config.FLASK_PORT, debug=False)
+    logger.info(f"Allowed tools: {Config.CLAUDE_ALLOWED_TOOLS}")
+    if Config.ALLOWED_USERS:
+        logger.info(f"Allowed users: {Config.ALLOWED_USERS}")
+    else:
+        logger.warning("No ALLOWED_USERS set — anyone can message the bot!")
+
+    app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
+
+    # Store sender in bot_data so handlers can access it
+    sender = MessageSender(app.bot)
+    app.bot_data["sender"] = sender
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("more", cmd_more))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    logger.info("Starting Telegram bot (polling)...")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
