@@ -63,7 +63,7 @@ class ClaudeRunner:
         if proc.returncode != 0:
             logger.error(f"Claude exited with code {proc.returncode}: {proc.stderr[:500]}")
             return ClaudeResult(
-                text=f"Claude error (exit {proc.returncode}): {proc.stderr[:300]}",
+                text=f"Claude error (exit code {proc.returncode}). Check server logs for details.",
                 session_id=session_id or "",
                 is_error=True,
             )

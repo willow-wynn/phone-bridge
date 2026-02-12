@@ -4,6 +4,7 @@ import threading
 from flask import Flask, Response, request
 from twilio.request_validator import RequestValidator
 from twilio.twiml.messaging_response import MessagingResponse
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import Config
 from session_store import SessionStore
@@ -13,6 +14,9 @@ from message_sender import MessageSender
 Config.validate()
 
 app = Flask(__name__)
+# Trust X-Forwarded-* headers from the tunnel so request.url matches
+# what Twilio signed against (the public HTTPS URL, not localhost)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 logger = logging.getLogger("phone-bridge")
 
 store = SessionStore(Config.DB_PATH)
@@ -58,7 +62,7 @@ def webhook():
     from_number = request.form.get("From", "")
     body = request.form.get("Body", "").strip()
 
-    logger.info(f"Message from {from_number}: {body[:80]}")
+    logger.info(f"Message from {from_number}: {body[:80]!r}")
 
     # Check allowlist
     bare_number = from_number.replace("whatsapp:", "")
@@ -147,11 +151,7 @@ def _process_message(from_number: str, body: str):
 
 @app.route("/health", methods=["GET"])
 def health():
-    return {
-        "status": "ok",
-        "working_dir": Config.CLAUDE_WORKING_DIR,
-        "allowed_tools": Config.CLAUDE_ALLOWED_TOOLS,
-    }
+    return {"status": "ok"}
 
 
 if __name__ == "__main__":
@@ -163,4 +163,4 @@ if __name__ == "__main__":
     logger.info(f"Claude working dir: {Config.CLAUDE_WORKING_DIR}")
     logger.info(f"Allowed phones: {Config.ALLOWED_PHONES}")
     logger.info(f"WhatsApp mode: {Config.TWILIO_PHONE_NUMBER.startswith('whatsapp:')}")
-    app.run(host="0.0.0.0", port=Config.FLASK_PORT, debug=False)
+    app.run(host="127.0.0.1", port=Config.FLASK_PORT, debug=False)
