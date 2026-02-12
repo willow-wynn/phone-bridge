@@ -21,7 +21,6 @@ store = SessionStore(Config.DB_PATH)
 runner = ClaudeRunner(
     working_dir=Config.CLAUDE_WORKING_DIR,
     allowed_tools=Config.CLAUDE_ALLOWED_TOOLS,
-    max_timeout=Config.CLAUDE_MAX_TIMEOUT,
     max_budget_usd=Config.CLAUDE_MAX_BUDGET_USD,
     system_prompt=Config.CLAUDE_SYSTEM_PROMPT,
 )
@@ -66,6 +65,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cost — Show cumulative session cost\n"
         "/prompt — View or set system prompt\n"
         "/chrome — Toggle Chrome browser control\n"
+        "/timeout — Kill active Claude process\n"
         "/help — Show this message\n\n"
         "You can also send photos and files.\n"
         "Anything else is sent to Claude Code."
@@ -126,6 +126,16 @@ async def cmd_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"System prompt updated:\n{text}")
 
 
+async def cmd_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not _is_allowed(user_id):
+        return
+    if runner.cancel():
+        await update.message.reply_text("Killed active Claude process.")
+    else:
+        await update.message.reply_text("No active process to kill.")
+
+
 async def cmd_chrome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not _is_allowed(user_id):
@@ -168,6 +178,32 @@ async def _download_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await file.download_to_drive(local_path)
     logger.info(f"Downloaded file to {local_path}")
     return local_path
+
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+
+
+async def _deliver_outbox(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Send any files in the outbox to the user, then delete them."""
+    outbox = Config.OUTBOX_DIR
+    if not os.path.isdir(outbox):
+        return
+
+    for filename in sorted(os.listdir(outbox)):
+        filepath = os.path.join(outbox, filename)
+        if not os.path.isfile(filepath):
+            continue
+
+        try:
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in IMAGE_EXTENSIONS:
+                await context.bot.send_photo(chat_id=chat_id, photo=open(filepath, "rb"), caption=filename)
+            else:
+                await context.bot.send_document(chat_id=chat_id, document=open(filepath, "rb"), filename=filename)
+            os.remove(filepath)
+            logger.info(f"Delivered outbox file: {filename}")
+        except Exception:
+            logger.exception(f"Failed to deliver outbox file: {filename}")
 
 
 def _format_status(elapsed: int, tool_calls: list[str]) -> str:
@@ -275,6 +311,9 @@ async def _process_message(
 
             await sender.send(user_id, text)
 
+            # Deliver any files from the outbox
+            await _deliver_outbox(context, user_id)
+
         except Exception:
             logger.exception(f"Error processing message from {user_id}")
             try:
@@ -346,6 +385,7 @@ def main():
     app.add_handler(CommandHandler("cost", cmd_cost))
     app.add_handler(CommandHandler("prompt", cmd_prompt))
     app.add_handler(CommandHandler("chrome", cmd_chrome))
+    app.add_handler(CommandHandler("timeout", cmd_timeout))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_photo_or_document))
 

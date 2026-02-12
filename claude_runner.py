@@ -60,6 +60,15 @@ def _summarize_tool(name: str, input_data: dict) -> str:
         case "Task":
             desc = input_data.get("description", input_data.get("prompt", "?")[:40])
             return f"Agent: {desc}"
+        case "TaskOutput":
+            return "Checking agent output"
+        case "TaskStop":
+            return "Stopping agent"
+        case "ToolSearch":
+            q = input_data.get("query", "?")
+            return f"Searching tools: {q[:40]}"
+        case "TodoWrite":
+            return "Updating todo list"
         case name if name.startswith("mcp__claude-in-chrome__"):
             action = name.split("__")[-1]
             match action:
@@ -90,21 +99,39 @@ def _summarize_tool(name: str, input_data: dict) -> str:
             return f"{name}"
 
 
+SAFETY_PROMPT = """IMPORTANT RULES:
+- You have full access to the filesystem, but NEVER delete, move, or rename files outside of ~/claude_stuff/ unless the user DIRECTLY and EXPLICITLY asks you to.
+- Inside ~/claude_stuff/ you can do whatever you want — create, delete, reorganize freely.
+- You can READ any file anywhere. You can WRITE/EDIT files anywhere. Just don't delete/move/rename outside ~/claude_stuff/ without being asked.
+- To send images, screenshots, plots, or any files back to the user, save them to ~/claude_stuff/outbox/ — they will be automatically delivered to the Telegram chat and then cleared.
+- When generating charts, saving screenshots, exporting files etc., always put them in ~/claude_stuff/outbox/ so the user receives them."""
+
+
 class ClaudeRunner:
     def __init__(
         self,
         working_dir: str,
         allowed_tools: str,
-        max_timeout: int,
         max_budget_usd: float,
         system_prompt: str = "",
     ):
         self.working_dir = working_dir
         self.allowed_tools = allowed_tools
-        self.max_timeout = max_timeout
         self.max_budget_usd = max_budget_usd
         self.system_prompt = system_prompt
         self.chrome_enabled = False
+        self._active_proc: subprocess.Popen | None = None
+        self._proc_lock = threading.Lock()
+
+    def cancel(self) -> bool:
+        """Kill the active Claude process. Returns True if a process was killed."""
+        with self._proc_lock:
+            proc = self._active_proc
+            if proc and proc.poll() is None:
+                proc.kill()
+                logger.info("Cancelled active Claude process")
+                return True
+        return False
 
     def _build_cmd(self, prompt: str, session_id: str | None, file_paths: list[str] | None, streaming: bool) -> list[str]:
         fmt = "stream-json" if streaming else "json"
@@ -126,8 +153,11 @@ class ClaudeRunner:
         if self.max_budget_usd > 0:
             cmd.extend(["--max-budget-usd", str(self.max_budget_usd)])
 
+        # Always include safety prompt; append user prompt if set
+        full_prompt = SAFETY_PROMPT
         if self.system_prompt:
-            cmd.extend(["--append-system-prompt", self.system_prompt])
+            full_prompt += f"\n\n{self.system_prompt}"
+        cmd.extend(["--append-system-prompt", full_prompt])
 
         return cmd
 
@@ -156,6 +186,9 @@ class ClaudeRunner:
                 cwd=self.working_dir,
                 env={**os.environ},
             )
+
+            with self._proc_lock:
+                self._active_proc = proc
 
             # Read stderr in background thread so it doesn't block
             stderr_parts = []
@@ -196,19 +229,10 @@ class ClaudeRunner:
                     result_obj = event
                     final_session_id = event.get("session_id", final_session_id)
 
-            proc.wait(timeout=self.max_timeout)
+            proc.wait()
             stderr_thread.join(timeout=5)
             stderr_output = "".join(stderr_parts)
 
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            logger.warning(f"Claude timed out after {self.max_timeout}s")
-            return ClaudeResult(
-                text=f"Request timed out after {self.max_timeout}s. Try a simpler question or increase CLAUDE_MAX_TIMEOUT.",
-                session_id=final_session_id,
-                is_error=True,
-                tool_calls=tool_calls,
-            )
         except Exception as e:
             logger.exception("Error running claude")
             return ClaudeResult(
@@ -217,8 +241,19 @@ class ClaudeRunner:
                 is_error=True,
                 tool_calls=tool_calls,
             )
+        finally:
+            with self._proc_lock:
+                self._active_proc = None
 
         if proc.returncode != 0:
+            # -9 (SIGKILL) means we cancelled it via /timeout
+            if proc.returncode == -9:
+                return ClaudeResult(
+                    text="Cancelled.",
+                    session_id=final_session_id,
+                    is_error=True,
+                    tool_calls=tool_calls,
+                )
             stderr_snippet = stderr_output.strip()[:500]
             logger.error(f"Claude exited with code {proc.returncode}: {stderr_snippet}")
             error_msg = f"Claude error (exit code {proc.returncode})"

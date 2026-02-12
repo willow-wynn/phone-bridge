@@ -17,10 +17,12 @@ class Config:
 
     # Claude
     CLAUDE_WORKING_DIR: str = os.environ.get("CLAUDE_WORKING_DIR", os.path.expanduser("~"))
-    CLAUDE_ALLOWED_TOOLS: str = os.environ.get("CLAUDE_ALLOWED_TOOLS", "Read,Write,Edit,Bash,Glob,Grep,WebSearch,WebFetch,NotebookEdit")
-    CLAUDE_MAX_TIMEOUT: int = int(os.environ.get("CLAUDE_MAX_TIMEOUT", "1800"))
+    CLAUDE_ALLOWED_TOOLS: str = os.environ.get("CLAUDE_ALLOWED_TOOLS", "Read,Write,Edit,Bash,Glob,Grep,WebSearch,WebFetch,NotebookEdit,Task,TaskOutput,TaskStop,ToolSearch,TodoWrite")
     CLAUDE_MAX_BUDGET_USD: float = float(os.environ.get("CLAUDE_MAX_BUDGET_USD", "5.00"))
     CLAUDE_SYSTEM_PROMPT: str = os.environ.get("CLAUDE_SYSTEM_PROMPT", "")
+
+    # Outbox for sending files back to the user
+    OUTBOX_DIR: str = os.path.join(os.environ.get("CLAUDE_WORKING_DIR", os.path.expanduser("~/claude_stuff")), "outbox")
 
     # Derived
     DB_PATH: str = os.path.join(os.path.expanduser("~"), ".phone-bridge", "sessions.db")
@@ -39,3 +41,4 @@ class Config:
 
         os.makedirs(os.path.dirname(cls.DB_PATH), exist_ok=True)
         os.makedirs(cls.CLAUDE_WORKING_DIR, exist_ok=True)
+        os.makedirs(cls.OUTBOX_DIR, exist_ok=True)
