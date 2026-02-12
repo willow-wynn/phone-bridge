@@ -60,6 +60,32 @@ def _summarize_tool(name: str, input_data: dict) -> str:
         case "Task":
             desc = input_data.get("description", input_data.get("prompt", "?")[:40])
             return f"Agent: {desc}"
+        case name if name.startswith("mcp__claude-in-chrome__"):
+            action = name.split("__")[-1]
+            match action:
+                case "computer":
+                    act = input_data.get("action", "?")
+                    return f"Chrome: {act}"
+                case "navigate":
+                    url = input_data.get("url", "?")
+                    return f"Chrome: navigating to {url[:40]}"
+                case "read_page":
+                    return "Chrome: reading page"
+                case "find":
+                    q = input_data.get("query", "?")
+                    return f"Chrome: finding {q[:40]}"
+                case "javascript_tool":
+                    return "Chrome: running JS"
+                case "form_input":
+                    return "Chrome: filling form"
+                case "tabs_context_mcp":
+                    return "Chrome: getting tabs"
+                case "tabs_create_mcp":
+                    return "Chrome: new tab"
+                case "get_page_text":
+                    return "Chrome: extracting text"
+                case _:
+                    return f"Chrome: {action}"
         case _:
             return f"{name}"
 
@@ -78,10 +104,14 @@ class ClaudeRunner:
         self.max_timeout = max_timeout
         self.max_budget_usd = max_budget_usd
         self.system_prompt = system_prompt
+        self.chrome_enabled = False
 
     def _build_cmd(self, prompt: str, session_id: str | None, file_paths: list[str] | None, streaming: bool) -> list[str]:
         fmt = "stream-json" if streaming else "json"
         cmd = ["claude", "-p", prompt, "--output-format", fmt, "--verbose"]
+
+        if self.chrome_enabled:
+            cmd.append("--chrome")
 
         if file_paths:
             for path in file_paths:

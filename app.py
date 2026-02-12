@@ -65,6 +65,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/more — Get truncated content\n"
         "/cost — Show cumulative session cost\n"
         "/prompt — View or set system prompt\n"
+        "/chrome — Toggle Chrome browser control\n"
         "/help — Show this message\n\n"
         "You can also send photos and files.\n"
         "Anything else is sent to Claude Code."
@@ -123,6 +124,15 @@ async def cmd_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     runner.system_prompt = text
     await update.message.reply_text(f"System prompt updated:\n{text}")
+
+
+async def cmd_chrome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not _is_allowed(user_id):
+        return
+    runner.chrome_enabled = not runner.chrome_enabled
+    state = "ON" if runner.chrome_enabled else "OFF"
+    await update.message.reply_text(f"Chrome tools: {state}")
 
 
 async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -335,6 +345,7 @@ def main():
     app.add_handler(CommandHandler("more", cmd_more))
     app.add_handler(CommandHandler("cost", cmd_cost))
     app.add_handler(CommandHandler("prompt", cmd_prompt))
+    app.add_handler(CommandHandler("chrome", cmd_chrome))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_photo_or_document))
 
