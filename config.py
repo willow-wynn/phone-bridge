@@ -17,9 +17,10 @@ class Config:
 
     # Claude
     CLAUDE_WORKING_DIR: str = os.environ.get("CLAUDE_WORKING_DIR", os.path.expanduser("~"))
-    CLAUDE_ALLOWED_TOOLS: str = os.environ.get("CLAUDE_ALLOWED_TOOLS", "Read,Glob,Grep")
-    CLAUDE_MAX_TIMEOUT: int = int(os.environ.get("CLAUDE_MAX_TIMEOUT", "120"))
-    CLAUDE_MAX_BUDGET_USD: float = float(os.environ.get("CLAUDE_MAX_BUDGET_USD", "1.00"))
+    CLAUDE_ALLOWED_TOOLS: str = os.environ.get("CLAUDE_ALLOWED_TOOLS", "Read,Write,Edit,Bash,Glob,Grep,WebSearch,WebFetch,NotebookEdit")
+    CLAUDE_MAX_TIMEOUT: int = int(os.environ.get("CLAUDE_MAX_TIMEOUT", "1800"))
+    CLAUDE_MAX_BUDGET_USD: float = float(os.environ.get("CLAUDE_MAX_BUDGET_USD", "5.00"))
+    CLAUDE_SYSTEM_PROMPT: str = os.environ.get("CLAUDE_SYSTEM_PROMPT", "")
 
     # Derived
     DB_PATH: str = os.path.join(os.path.expanduser("~"), ".phone-bridge", "sessions.db")

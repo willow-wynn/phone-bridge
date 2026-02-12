@@ -19,9 +19,15 @@ class SessionStore:
                     working_dir TEXT NOT NULL,
                     created_at TEXT DEFAULT (datetime('now')),
                     last_used_at TEXT DEFAULT (datetime('now')),
-                    message_count INTEGER DEFAULT 0
+                    message_count INTEGER DEFAULT 0,
+                    total_cost_usd REAL DEFAULT 0.0
                 )
             """)
+            # Migrate existing tables that lack the cost column
+            try:
+                conn.execute("ALTER TABLE sessions ADD COLUMN total_cost_usd REAL DEFAULT 0.0")
+            except Exception:
+                pass  # Column already exists
 
     def get_session(self, phone_number: str) -> str | None:
         """Return session_id for phone, or None if no session exists."""
@@ -38,21 +44,31 @@ class SessionStore:
                 return row[0]
             return None
 
-    def save_session(self, phone_number: str, session_id: str, working_dir: str):
-        """Upsert session_id for phone number."""
+    def save_session(self, phone_number: str, session_id: str, working_dir: str, cost_usd: float = 0.0):
+        """Upsert session_id for phone number, accumulating cost."""
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO sessions (phone_number, session_id, working_dir, created_at, last_used_at, message_count)
-                VALUES (?, ?, ?, ?, ?, 1)
+                INSERT INTO sessions (phone_number, session_id, working_dir, created_at, last_used_at, message_count, total_cost_usd)
+                VALUES (?, ?, ?, ?, ?, 1, ?)
                 ON CONFLICT(phone_number) DO UPDATE SET
                     session_id = excluded.session_id,
                     last_used_at = excluded.last_used_at,
-                    message_count = message_count + 1
+                    message_count = message_count + 1,
+                    total_cost_usd = total_cost_usd + ?
                 """,
-                (phone_number, session_id, working_dir, now, now),
+                (phone_number, session_id, working_dir, now, now, cost_usd, cost_usd),
             )
+
+    def get_cost(self, phone_number: str) -> float:
+        """Return cumulative cost for a user."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT total_cost_usd FROM sessions WHERE phone_number = ?",
+                (phone_number,),
+            ).fetchone()
+            return row[0] if row else 0.0
 
     def reset_session(self, phone_number: str):
         """Delete session for phone number."""

@@ -1,4 +1,6 @@
+import html
 import logging
+import re
 
 from telegram import Bot
 from telegram.constants import MessageLimit
@@ -9,16 +11,64 @@ TELEGRAM_MAX = MessageLimit.MAX_TEXT_LENGTH  # 4096
 TRUNCATE_THRESHOLD = 16000
 
 
+def markdown_to_telegram_html(text: str) -> str:
+    """Convert Claude's Markdown to Telegram-compatible HTML.
+
+    Handles fenced code blocks, inline code, bold, italic, and strikethrough.
+    Anything not inside a code block gets HTML-escaped first so raw < > & are safe.
+    """
+    parts: list[str] = []
+    # Split on fenced code blocks (``` ... ```)
+    segments = re.split(r"(```(?:\w*)\n[\s\S]*?```)", text)
+
+    for segment in segments:
+        m = re.match(r"```(\w*)\n([\s\S]*?)```", segment)
+        if m:
+            lang = m.group(1)
+            code = html.escape(m.group(2).rstrip("\n"))
+            if lang:
+                parts.append(f'<pre><code class="language-{lang}">{code}</code></pre>')
+            else:
+                parts.append(f"<pre>{code}</pre>")
+        else:
+            # Escape HTML entities first
+            s = html.escape(segment)
+            # Inline code
+            s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+            # Bold (**text** or __text__)
+            s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+            s = re.sub(r"__(.+?)__", r"<b>\1</b>", s)
+            # Italic (*text* or _text_) — careful not to match inside words with underscores
+            s = re.sub(r"(?<!\w)\*(?!\*)(.+?)(?<!\*)\*(?!\w)", r"<i>\1</i>", s)
+            s = re.sub(r"(?<!\w)_(?!_)(.+?)(?<!_)_(?!\w)", r"<i>\1</i>", s)
+            # Strikethrough
+            s = re.sub(r"~~(.+?)~~", r"<s>\1</s>", s)
+            parts.append(s)
+
+    return "".join(parts)
+
+
 class MessageSender:
     def __init__(self, bot: Bot):
         self.bot = bot
         self._overflow: dict[int, str] = {}
 
     async def send(self, chat_id: int, text: str):
-        """Send a message, splitting or truncating if needed."""
+        """Send a message, splitting or truncating if needed.
+
+        Converts Markdown to Telegram HTML. Falls back to plain text if
+        Telegram rejects the markup.
+        """
         chunks = self._prepare_chunks(chat_id, text)
         for chunk in chunks:
-            await self.bot.send_message(chat_id=chat_id, text=chunk)
+            html_chunk = markdown_to_telegram_html(chunk)
+            try:
+                await self.bot.send_message(
+                    chat_id=chat_id, text=html_chunk, parse_mode="HTML",
+                )
+            except Exception:
+                # Fallback: send as plain text if HTML parsing fails
+                await self.bot.send_message(chat_id=chat_id, text=chunk)
 
     async def send_more(self, chat_id: int) -> bool:
         """Send the next batch of overflow text."""
